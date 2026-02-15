@@ -1,78 +1,77 @@
-
 import speech_recognition as sr
-import pyttsx3
 import sounddevice as sd
-import numpy as np
 import scipy.io.wavfile as wav
 import os
 import requests
 import pandas as pd
-from datetime import date, datetime
+from datetime import datetime
 import matplotlib.pyplot as plt
+import time
+import random
+import subprocess
+
+# =========================
+# Почему так:
+# - Этот вариант стабилен: каждый вызов TTS — отдельный процесс, Speak() блокирует до окончания.
+# =========================
+
+def _ps_escape_single_quoted(text: str) -> str:
+    # В PowerShell внутри одинарных кавычек экранирование: ' -> ''
+    return text.replace("'", "''").replace("\n", " ").replace("\r", " ")
 
 
-engine = pyttsx3.init()
+def speak(text: str):
+    """Произнести текст и дождаться окончания."""
+    text = str(text)
+    print(f"🗣️ {text}")
 
-
-try:
-    voices = engine.getProperty('voices')
-    female_voice_found = False
-    for voice in voices:
-        if ('ru' in str(voice.languages) or 'russian' in voice.name.lower()) and 'female' in voice.name.lower():
-            engine.setProperty('voice', voice.id)
-            female_voice_found = True
-            print("✅ Выбран женский русскоязычный голос")
+    safe = _ps_escape_single_quoted(text)
+    ps_cmd = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        "$speak.Volume = 90; "
+        "$speak.Rate = 120; "
+        f"$speak.Speak('{safe}');"
+    )    # -NoProfile, чтобы не зависело от профиля PowerShell
+    for shell in ("powershell", "pwsh"):
+        try:
+            subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             break
-
-    if not female_voice_found:
-        for voice in voices:
-            if 'ru' in str(voice.languages) or 'russian' in voice.name.lower():
-                engine.setProperty('voice', voice.id)
-                print("✅ Выбран русскоязычный голос (женский не найден)")
-                female_voice_found = True
-                break
-        if not female_voice_found:
-            print("⚠️ Не найден русскоязычный голос. Будет использован голос по умолчанию.")
-except Exception as e:
-    print(f"⚠️ Ошибка настройки голоса: {e}")
-    print("Используется голос по умолчанию")
-
-engine.setProperty('rate', 150)  
-engine.setProperty('volume', 0.9)  
+        except FileNotFoundError:
+            continue
+    else:
+        print("❌ PowerShell (powershell/pwsh) не найден. TTS отключён.")
 
 
-city_coordinates = {
-    "Москва": (55.7558, 37.6173),
-    "Тверь": (56.8587, 35.9176),
-    "Санкт‑Петербург": (59.9343, 30.3351),
-    "Антарктида": (-82.8628, 135.0000)  
-}
-
-cities = list(city_coordinates.keys())
-commands = ["анализ", "ответ", "выход"]
-questions = [
-    "что это такое",
-    "причины глобального потепления",
-    "последствия",
-    "как мы можем решить эту проблему"
-]
+# =========================
+# Настройки записи
+# =========================
 
 duration = 4
 sample_rate = 16000
 channels = 1
 dtype = "int16"
 
+
 def record_audio():
+    # Важно: вызываем запись ТОЛЬКО после speak(), чтобы ассистент не слушал, пока говорит.
     print("🎙️ Слушаю...")
     recording = sd.rec(
         int(duration * sample_rate),
         samplerate=sample_rate,
         channels=channels,
-        dtype=dtype
+        dtype=dtype,
     )
     sd.wait()
+    sd.stop()  # освобождаем аудиоустройство
     wav.write("output.wav", sample_rate, recording)
     return "output.wav"
+
 
 def recognize_speech(audio_file):
     """Распознаёт речь из аудиофайла"""
@@ -85,29 +84,43 @@ def recognize_speech(audio_file):
         return text.lower()
     except sr.UnknownValueError:
         print("❌ Не удалось распознать речь.")
-        engine.say("Извините, я не расслышала. Повторите, пожалуйста.")
-        engine.runAndWait()
+        speak("Извините, я не расслышала. Повторите, пожалуйста.")
         return None
     except sr.RequestError as e:
         print(f"❌ Ошибка сервиса распознавания: {e}")
-        engine.say("Сервис распознавания временно недоступен. Попробуйте позже.")
-        engine.runAndWait()
+        speak("Сервис распознавания временно недоступен. Попробуйте позже.")
         return None
     except Exception as e:
         print(f"❌ Ошибка при обработке аудио: {e}")
-        engine.say("Произошла ошибка при обработке аудио.")
-        engine.runAndWait()
+        speak("Произошла ошибка при обработке аудио.")
         return None
 
+
+city_coordinates = {
+    "Москва": (55.7558, 37.6173),
+    "Тверь": (56.8587, 35.9176),
+    "Санкт-Петербург": (59.9343, 30.3351),
+    "Антарктида": (-82.8628, 135.0000),
+}
+
+cities = list(city_coordinates.keys())
+commands = ["анализ", "ответ", "выход"]
+questions = [
+    "что это такое",
+    "причины глобального потепления",
+    "последствия",
+    "как мы можем решить эту проблему",
+]
+
+
 def get_answer(question):
-    """Возвращает ответ на конкретный вопрос"""
     answers = {
         "что это такое": (
             "Глобальное потепление — это долгосрочное повышение средней температуры климатической системы Земли, "
             "наблюдаемое уже более века (с доиндустриального периода, примерно с 1850–1900 гг.)."
         ),
         "причины глобального потепления": (
-            "Основные причины: выбросы CO₂ от сжигания ископаемого топлива, вырубка лесов, выбросы метана от сельского хозяйства, "
+            "Основные причины: выбросы CO2 от сжигания ископаемого топлива, вырубка лесов, выбросы метана от сельского хозяйства, "
             "промышленные газы. Всё это усиливает парниковый эффект."
         ),
         "последствия": (
@@ -116,22 +129,20 @@ def get_answer(question):
         ),
         "как мы можем решить эту проблему": (
             "Решения: переход на возобновляемые источники энергии, повышение энергоэффективности, сохранение лесов, "
-            "сокращение выбросов метана, развитие технологий улавливания CO₂, адаптация инфраструктуры."
-        )
+            "сокращение выбросов метана, развитие технологий улавливания CO2, адаптация инфраструктуры."
+        ),
     }
     for key in answers:
         if key in question:
             return answers[key]
     return "К сожалению, у меня нет информации по этому вопросу. Задайте другой вопрос из списка."
 
+
 def get_weather_openmeteo(city):
-    """Получает текущую погоду через Open-Meteo API"""
     if city not in city_coordinates:
         return None
 
     lat, lon = city_coordinates[city]
-
-    
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}&"
@@ -143,9 +154,8 @@ def get_weather_openmeteo(city):
         response = requests.get(url, timeout=15)
         if response.status_code == 200:
             data = response.json()
-            current = data['current_weather']
+            current = data["current_weather"]
 
-            
             weather_conditions = {
                 0: "Ясно",
                 1: "В основном ясно",
@@ -167,18 +177,22 @@ def get_weather_openmeteo(city):
                 82: "Сильные ливни",
                 95: "Гроза слабая или умеренная",
                 96: "Гроза с градом",
-                99: "Сильная гроза с градом"
+                99: "Сильная гроза с градом",
             }
 
-            condition_text = weather_conditions.get(current['weathercode'], f"Код {current['weathercode']}")
+            condition_text = weather_conditions.get(current["weathercode"], f"Код {current['weathercode']}")
 
-            return pd.DataFrame([{
-                'date': datetime.now().date(),
-                'tavg': current['temperature'],
-                'wspd': current['windspeed'],
-                'humidity': 'N/A',  
-                'condition': condition_text
-            }])
+            return pd.DataFrame(
+                [
+                    {
+                        "date": datetime.now().date(),
+                        "tavg": current["temperature"],
+                        "wspd": current["windspeed"],
+                        "humidity": "N/A",
+                        "condition": condition_text,
+                    }
+                ]
+            )
         else:
             print(f"Ошибка HTTP: {response.status_code}")
             return None
@@ -192,67 +206,46 @@ def get_weather_openmeteo(city):
         print(f"❌ Неожиданная ошибка запроса Open-Meteo: {e}")
         return None
 
+
 def execute_command(text):
-    """Обрабатывает команду пользователя"""
     if not text:
-        engine.say("Я не расслышала команду. Повторите, пожалуйста.")
-        engine.runAndWait()
+        speak("Я не расслышала команду. Повторите, пожалуйста.")
         return True
 
     if "выход" in text:
         farewell_messages = [
             "Было очень приятно с вами пообщаться! До новых встреч!",
             "Спасибо за общение! Буду рада помочь снова. До свидания!",
-            "До свидания! Надеюсь, вы узнали что‑то новое. Хорошего дня!",
+            "До свидания! Надеюсь, вы узнали что-то новое. Хорошего дня!",
         ]
-        import random
-        selected_farewell = random.choice(farewell_messages)
-        print(f"🗣️ {selected_farewell}")
-        engine.say(selected_farewell)
-        engine.runAndWait()
+        speak(random.choice(farewell_messages))
         return False
 
     elif "ответ" in text or "вопрос" in text:
-        output_text = "Отлично! Задайте один из вопросов: " + ", ".join(questions)
-        print(output_text)
-        engine.say(output_text)
-        engine.runAndWait()
+        speak("Отлично! Задайте один из вопросов: " + ", ".join(questions))
 
-      
         for attempt in range(2):
             audio_file = record_audio()
             user_question = recognize_speech(audio_file)
 
             if user_question:
                 answer = get_answer(user_question)
-                print(f"💬 Ответ: {answer}")
-                engine.say(answer)
-                engine.runAndWait()
+                speak(answer)
                 break
             else:
                 if attempt == 0:
-                    retry_text = "Не удалось распознать вопрос. Повторите, пожалуйста."
-                    print(f"🗣️ {retry_text}")
-                    engine.say(retry_text)
-                    engine.runAndWait()
+                    speak("Не удалось распознать вопрос. Повторите, пожалуйста.")
                 else:
-                    final_text = (
-                        "К сожалению, не удалось распознать вопрос. "
-                        "Вернусь к главному меню. Скажите «ответ», чтобы попробовать снова."
+                    speak(
+                        "К сожалению, не удалось распознать вопрос. Вернусь к главному меню. "
+                        "Скажите «ответ», чтобы попробовать снова."
                     )
-                    print(f"🗣️ {final_text}")
-                    engine.say(final_text)
-                    engine.runAndWait()
 
     elif "анализ" in text:
-        prompt_text = (
+        speak(
             "Хорошо, выполним анализ погоды. Назовите город из списка: "
-            "Москва, Тверь, Санкт‑Петербург или Антарктида."
+            "Москва, Тверь, Санкт-Петербург или Антарктида."
         )
-        print(prompt_text)
-        engine.say(prompt_text)
-        engine.runAndWait()
-
 
         chosen_city = None
         for attempt in range(3):
@@ -269,58 +262,36 @@ def execute_command(text):
                     break
                 else:
                     if attempt < 2:
-                        retry_city_text = (
+                        speak(
                             f"Город '{city_input}' не найден в списке. "
-                            f"Доступные города: Москва, Тверь, Санкт‑Петербург, Антарктида. "
+                            f"Доступные города: Москва, Тверь, Санкт-Петербург, Антарктида. "
                             f"Повторите, пожалуйста."
-                )
-                print(f"🗣️ {retry_city_text}")
-                engine.say(retry_city_text)
-                engine.runAndWait()
+                        )
             else:
                 if attempt < 2:
-                    no_city_text = "Не удалось распознать название города. Повторите."
-                    print(f"🗣️ {no_city_text}")
-            engine.say(no_city_text)
-            engine.runAndWait()
+                    speak("Не удалось распознать название города. Повторите.")
 
         if not chosen_city:
-            final_city_fail = (
+            speak(
                 "После нескольких попыток не удалось определить город. "
                 "Вернусь к главному меню. Скажите «анализ», чтобы повторить."
             )
-            print(f"🗣️ {final_city_fail}")
-            engine.say(final_city_fail)
-            engine.runAndWait()
             return True
 
-     
         print(f"🌍 Получаю данные для {chosen_city}...")
         df = get_weather_openmeteo(chosen_city)
 
         if df is None or df.empty:
-            error_text = (
+            speak(
                 f"Не удалось получить данные о погоде для {chosen_city}. "
-                f"Возможно, проблема с интернет‑соединением или сервис временно недоступен. "
+                f"Возможно, проблема с интернет-соединением или сервис временно недоступен. "
                 f"Попробуйте позже или выберите другой город."
             )
-            print(f"❌ {error_text}")
-            engine.say(error_text)
-            engine.runAndWait()
         else:
-        
-            print(f"\n📊 Текущая погода для {chosen_city}:")
             current_data = df.iloc[0]
-            temp = current_data['tavg']
-            wind = current_data['wspd']
-            condition = current_data['condition']
-
-            weather_info = (
-                f"Температура: {temp}°C, "
-                f"Скорость ветра: {wind} м/с, "
-                f"Состояние: {condition}"
-            )
-            print(weather_info)
+            temp = float(current_data["tavg"])
+            wind = float(current_data["wspd"])
+            condition = str(current_data["condition"])
 
             temp_comment = (
                 "очень жарко" if temp > 30 else
@@ -343,62 +314,46 @@ def execute_command(text):
                 f"{wind_comment}, скорость ветра {wind} метров в секунду. "
                 f"На улице {condition.lower()}. Хорошего дня!"
             )
-            print(f"🗣️ {speech_weather}")
-            engine.say(speech_weather)
-            engine.runAndWait()
+            speak(speech_weather)
 
-
-     
             plt.figure(figsize=(10, 6))
-            bars = plt.bar(
-                ['Температура (°C)', 'Скорость ветра (м/с)'],
-                [temp, wind],
-                color=['#FF6B6B', '#4ECDC4']
-            )
-            plt.title(f'Погода в {chosen_city}', fontsize=14, fontweight='bold')
-            plt.ylabel('Значения', fontsize=12)
-   
+            bars = plt.bar(["Температура (°C)", "Скорость ветра (м/с)"], [temp, wind])
+            plt.title(f"Погода в {chosen_city}", fontsize=14, fontweight="bold")
+            plt.ylabel("Значения", fontsize=12)
+
             for bar, value in zip(bars, [temp, wind]):
                 plt.text(
                     bar.get_x() + bar.get_width() / 2,
                     bar.get_height() + 0.1,
-            f'{value}',
-            ha='center',
-            va='bottom',
-            fontsize=11,
-            fontweight='bold'
-        )
-        plt.grid(axis='y', alpha=0.3)
-        plt.tight_layout()
-        plt.show()
+                    f"{value}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=11,
+                    fontweight="bold",
+                )
+
+            plt.grid(axis="y", alpha=0.3)
+            plt.tight_layout()
+            plt.show()
 
     else:
-
-        unknown_cmd_msg = (
+        speak(
             "Извините, я не поняла команду. Доступные команды: «ответ» — чтобы задать вопрос о глобальном потеплении, "
             "«анализ» — чтобы узнать погоду в городе, и «выход» — чтобы завершить работу."
         )
-        print(f"❓ {unknown_cmd_msg}")
-        engine.say(unknown_cmd_msg)
-        engine.runAndWait()
 
-    return True  
+    return True
 
 
 def main():
-    greeting_msg = "Привет! Я виртуальный помощник по вопросам глобального потепления и погоды."
-    print(greeting_msg)
-    engine.say(greeting_msg)
-    engine.runAndWait()
+    speak("Привет! Я виртуальный помощник по вопросам глобального потепления и погоды.")
 
-    commands_info = f"\nДоступные команды: {', '.join(commands)}"
-    print(commands_info)
-    engine.say(
+    print("\nДоступные команды:", ", ".join(commands))
+    speak(
         "Запомните мои команды: скажите «ответ», чтобы задать вопрос про глобальное потепление. "
         "Скажите «анализ», чтобы узнать текущую погоду в одном из городов. "
         "И скажите «выход», чтобы завершить работу со мной."
     )
-    engine.runAndWait()
 
     while True:
         audio_file = record_audio()
@@ -409,39 +364,27 @@ def main():
                 if not execute_command(command):
                     break
             except Exception as e:
-                error_msg = f"Произошла непредвиденная ошибка: {e}. Вернусь к главному меню."
-                print(f"❌ {error_msg}")
-                engine.say(error_msg)
-                engine.runAndWait()
+                speak(f"Произошла непредвиденная ошибка: {e}. Вернусь к главному меню.")
         else:
-           
-            no_command_msg = "Я не расслышала команду. Повторите, пожалуйста."
-            print(f"❓ {no_command_msg}")
-            engine.say(no_command_msg)
-            engine.runAndWait()
+            speak("Я не расслышала команду. Повторите, пожалуйста.")
 
-    
         try:
             if os.path.exists("output.wav"):
                 os.remove("output.wav")
         except Exception as e:
             print(f"⚠️ Не удалось удалить временный файл: {e}")
 
-   
-        import time
-        time.sleep(1)
+        time.sleep(0.5)
+
 
 if __name__ == "__main__":
-
     try:
         print("🚀 Запуск виртуального помощника...")
         main()
     except KeyboardInterrupt:
         print("\n👋 Работа помощника прервана пользователем.")
-        engine.say("До свидания! Буду рада помочь в следующий раз.")
-        engine.runAndWait()
+        speak("До свидания! Буду рада помочь в следующий раз.")
     except Exception as e:
         print(f"❌ Критическая ошибка при запуске: {e}")
-        engine.say("К сожалению, произошла критическая ошибка. Помощник не может запуститься.")
-        engine.runAndWait()
-    main()
+        # на фатале просто печатаем, без попыток TTS
+        print("К сожалению, произошла критическая ошибка. Помощник не может запуститься.")
